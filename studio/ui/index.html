@@ -122,6 +122,23 @@
   .modal p { color: var(--muted); margin: 0 0 14px; font-size: 13px; line-height: 1.6; }
   .modal .row { justify-content: flex-end; }
   .toast { position: fixed; right: 20px; bottom: 20px; background: #191919; border: 1px solid var(--line-2); padding: 12px 16px; border-radius: 16px; max-width: 420px; z-index: 20; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+  .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 24px; padding: 18px; }
+  .kpi small { color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .kpi .v { font-size: 44px; font-weight: 400; letter-spacing: -.045em; line-height: 1.05; margin-top: 6px; background: var(--grad-text); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .kpi .u { color: var(--muted); font-size: 13px; }
+  .gl { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .g { padding: 5px 12px; border-radius: 999px; font-size: 13px; border: 1px solid rgba(47,234,116,.35); color: var(--mint); }
+  .g.off { border-color: var(--line-2); color: var(--dim); text-decoration: line-through; }
+  .bars { display: grid; gap: 12px; }
+  .bar { display: grid; gap: 6px; }
+  .bar .t { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); }
+  .bar .t b { color: var(--text); font-weight: 600; }
+  .track { height: 10px; border-radius: 99px; background: #1e1e1e; overflow: hidden; }
+  .track > i { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, #15a4cf, #2fea74); }
+  .track > i.hot { background: linear-gradient(90deg, #f6bc17, #ff6b7a); }
+  .chip:disabled { opacity: .35; cursor: not-allowed; text-decoration: line-through; }
+  @media (max-width: 1200px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   [hidden] { display: none !important; }
   ::selection { background: rgba(21,164,207,.35); }
   ::-webkit-scrollbar { width: 10px; height: 10px; } ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 99px; border: 2px solid #000; }
@@ -141,8 +158,8 @@
     <div class="side-head"><h3>Máy Colab</h3><button class="btn btn-primary btn-sm" id="btnNew">+ Máy mới</button></div>
     <div class="machines" id="machines"></div>
     <div class="side-foot">
-      <div class="usage"><small>Đơn vị tính toán</small><div class="big" id="usageBig">—</div><small id="usageSub">Bấm "Xem" để cập nhật</small></div>
-      <div class="row"><button class="btn btn-ghost btn-sm" id="btnUsage">Xem</button><button class="btn btn-ghost btn-sm" id="btnPay">Mua thêm</button></div>
+      <div class="usage" id="usageCard" style="cursor:pointer" title="Xem chi tiết tài khoản"><small>Đơn vị tính toán còn lại</small><div class="big" id="usageBig">—</div><small id="usageSub">Đang đọc…</small></div>
+      <div class="row"><button class="btn btn-ghost btn-sm" id="btnUsage">Làm mới</button><button class="btn btn-ghost btn-sm" id="btnPay">Mua thêm</button></div>
     </div>
   </aside>
 
@@ -153,6 +170,7 @@
         <button data-v="files">Tệp</button>
         <button data-v="pkgs">Thư viện</button>
         <button data-v="drive">Drive &amp; nhật ký</button>
+        <button data-v="acct">Tài khoản &amp; gói</button>
       </div>
       <span class="cur" id="cur">Chưa chọn máy</span>
     </div>
@@ -196,6 +214,20 @@ const S = { machines: [], cur: null, view: 'run', job: null, signedIn: false, cw
 const HW = [['CPU', 'CPU'], ['T4', 'GPU T4'], ['L4', 'GPU L4'], ['A100', 'GPU A100'], ['H100', 'GPU H100'], ['G4', 'GPU G4'], ['V5E1', 'TPU v5e'], ['V6E1', 'TPU v6e']];
 const hwArgs = (k, high) => (k === 'CPU' ? [] : k.startsWith('V') ? ['--tpu', k] : ['--gpu', k]).concat(high ? ['--high-mem'] : []);
 let api;
+S.acct = null; S.stats = {};
+const fmt = (n, d = 2) => (n == null ? '—' : Number(n).toLocaleString('vi-VN', { maximumFractionDigits: d, minimumFractionDigits: 0 }));
+const gb = (mb) => (mb == null ? '—' : (mb / 1024).toLocaleString('vi-VN', { maximumFractionDigits: 1 }) + ' GB');
+async function loadAccount(quiet = false) {
+  if (!S.signedIn) { $('#usageBig').textContent = '—'; $('#usageSub').textContent = 'Đăng nhập để xem'; return; }
+  if (!quiet) $('#usageSub').textContent = 'Đang hỏi Colab…';
+  const a = await api.account();
+  S.acct = a;
+  if (a.error) { $('#usageBig').textContent = 'lỗi'; $('#usageSub').textContent = 'Không đọc được tài khoản'; log(a.error, 'bad'); return; }
+  $('#usageBig').textContent = fmt(a.balance);
+  $('#usageSub').textContent = a.rate > 0 ? `Đang tiêu ${fmt(a.rate)}/giờ · còn ~${fmt(a.hoursLeft, 1)} giờ` : 'Không máy nào đang tiêu · ' + a.at;
+  if (S.view === 'acct') draw();
+}
+setInterval(() => { if (S.signedIn && !document.hidden) loadAccount(true); }, 60000);
 
 function toast(t, ms = 4500) { const el = $('#toast'); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => { el.hidden = true; }, ms); }
 function log(text, cls = '') { const el = $('#log'); if (el.firstChild?.classList?.contains('note') && el.childNodes.length === 1) el.textContent = ''; const s = document.createElement('div'); if (cls) s.className = cls; s.textContent = text; el.append(s); while (el.childNodes.length > 4000) el.firstChild.remove(); el.scrollTop = el.scrollHeight; }
@@ -237,7 +269,7 @@ $('#authGo').onclick = async () => {
   const code = $('#authCode').value.trim(); if (!code) return toast('Dán mã xác thực vào ô trước');
   const r = await api.auth_finish(code);
   if (!r.ok) return toast('Đăng nhập chưa được: ' + r.error, 8000);
-  $('#mAuth').hidden = true; toast('Đã đăng nhập Google'); await refreshAuth(); syncServer();
+  $('#mAuth').hidden = true; toast('Đã đăng nhập Google'); await refreshAuth(); syncServer(); loadAccount();
 };
 $('#authOut').onclick = async () => { await api.auth_logout(); await refreshAuth(); toast('Đã đăng xuất'); };
 
@@ -275,7 +307,8 @@ $('#pillRefresh').onclick = syncServer;
 // tạo máy mới
 $('#btnNew').onclick = () => { if (!needAuth()) return; $('#mNew').hidden = false; drawHw('#newHw', 'hw'); };
 function drawHw(sel, key) {
-  $(sel).innerHTML = HW.map(([k, l]) => `<button class="chip ${S[key] === k ? 'on' : ''}" data-k="${k}">${l}</button>`).join('');
+  const no = new Set([...(S.acct?.ineligibleGpus || []), ...(S.acct?.ineligibleTpus || [])].map((x) => String(x).toUpperCase()));
+  $(sel).innerHTML = HW.map(([k, l]) => `<button class="chip ${S[key] === k ? 'on' : ''}" data-k="${k}" ${no.has(k) ? 'disabled title="Tài khoản chưa được dùng loại này"' : ''}>${l}</button>`).join('');
   $(sel).querySelectorAll('.chip').forEach((c) => { c.onclick = () => { S[key] = c.dataset.k; drawHw(sel, key); }; });
 }
 $('#newGo').onclick = async () => {
@@ -284,7 +317,8 @@ $('#newGo').onclick = async () => {
   const args = ['new', ...(name ? ['-s', name] : []), ...hwArgs(S.hw, $('#newHigh').checked)];
   const r = await run(args, { label: 'tạo máy' });
   await loadMachines();
-  if (r && r.code === 0) { if (name) S.cur = name; else if (S.machines.length) S.cur = S.machines[S.machines.length - 1].name; drawMachines(); toast('Đã có máy Colab — chạy code được rồi'); }
+  if (r && r.code === 0) { if (name) S.cur = name; else if (S.machines.length) S.cur = S.machines[S.machines.length - 1].name; drawMachines(); toast('Đã có máy Colab — chạy code được rồi'); loadStats(S.cur); }
+  loadAccount(true);
 };
 
 // ---------- các tab ----------
@@ -295,24 +329,70 @@ function draw() {
   if (S.view === 'run') return drawRun(v);
   if (S.view === 'files') return drawFiles(v);
   if (S.view === 'pkgs') return drawPkgs(v);
+  if (S.view === 'acct') return drawAcct(v);
   return drawDrive(v);
+}
+
+function drawAcct(v) {
+  const a = S.acct;
+  if (!S.signedIn) { v.innerHTML = '<div class="card lock">Đăng nhập Google để xem gói và đơn vị tính toán.</div>'; return; }
+  if (!a) { v.innerHTML = '<div class="card lock">Đang đọc tài khoản…</div>'; loadAccount(); return; }
+  if (a.error) { v.innerHTML = `<div class="card lock">Không đọc được tài khoản: ${esc(a.error)}</div>`; return; }
+  const chips = (ok, no) => ok.map((g) => `<span class="g">${esc(g)}</span>`).join('') + no.map((g) => `<span class="g off" title="Tài khoản chưa được dùng">${esc(g)}</span>`).join('');
+  v.innerHTML = `
+  <div class="card"><div class="row"><div style="flex:1"><h2>Tài khoản <em>Colab</em></h2><p class="sub" style="margin:0">${esc(a.email || 'Tài khoản Google')} · cập nhật ${esc(a.at)}</p></div>
+    <button class="btn btn-ghost btn-sm" id="acRefresh">Làm mới</button><button class="btn btn-primary btn-sm" id="acPay">Mua thêm đơn vị</button></div></div>
+  <div class="kpis" style="margin-top:14px">
+    <div class="kpi"><small>Còn lại</small><div class="v">${fmt(a.balance)}</div><span class="u">đơn vị tính toán</span></div>
+    <div class="kpi"><small>Đang tiêu</small><div class="v">${fmt(a.rate)}</div><span class="u">đơn vị / giờ</span></div>
+    <div class="kpi"><small>Dùng được thêm</small><div class="v">${a.hoursLeft == null ? '∞' : fmt(a.hoursLeft, 1)}</div><span class="u">${a.hoursLeft == null ? 'giờ (chưa máy nào tiêu)' : 'giờ ở mức hiện tại'}</span></div>
+    <div class="kpi"><small>Máy đang chạy</small><div class="v">${fmt(a.assignments, 0)}</div><span class="u">trên tài khoản</span></div>
+  </div>
+  <div class="card" style="margin-top:14px"><h2>Gói <em>đang dùng</em></h2><p class="sub">${esc(a.plan)}${a.planGuessed ? ' — <i>ước đoán từ quyền dùng GPU; Colab không trả tên gói</i>' : ''}</p>
+    <div><b>GPU</b><div class="gl">${chips(a.eligibleGpus, a.ineligibleGpus)}</div></div>
+    <div style="margin-top:12px"><b>TPU</b><div class="gl">${chips(a.eligibleTpus, a.ineligibleTpus)}</div></div>
+    <p class="sub" style="margin:12px 0 0">Gạch ngang: tài khoản chưa được dùng loại này. Máy nào chạy cũng tiêu đơn vị theo giờ — xong việc nhớ <b>Tắt máy</b>.</p></div>
+  ${a.machines.length ? `<div class="card"><h2>Máy đang <em>tính tiền</em></h2>${a.machines.map((m) => `<div class="frow"><span class="n">${esc(m.endpoint || '')}</span><span class="tag gpu">${esc(m.accelerator || '')}</span><span class="tag">${esc(m.machineShape || m.variant || '')}</span></div>`).join('')}</div>` : ''}`;
+  $('#acRefresh').onclick = () => loadAccount();
+  $('#acPay').onclick = () => run(['pay'], { label: 'mua thêm' });
 }
 
 function machineBar() {
   if (!S.cur) return `<div class="card lock">Chọn một máy ở cột trái, hoặc bấm <b>+ Máy mới</b>.</div>`;
   const m = S.machines.find((x) => x.name === S.cur) || {};
   return `<div class="card"><div class="row"><div style="flex:1"><h2><em>${esc(S.cur)}</em></h2><p class="sub" style="margin:0">${esc(m.accelerator && m.accelerator !== 'NONE' ? 'GPU/TPU ' + m.accelerator : 'CPU')} · ${esc(m.variant || '')}</p></div>
+    <button class="btn btn-ghost btn-sm" id="mStats">Tài nguyên</button>
     <button class="btn btn-ghost btn-sm" id="mStatus" data-needs-idle>Trạng thái</button>
     <button class="btn btn-ghost btn-sm" id="mRestart" data-needs-idle>Khởi động lại kernel</button>
     <button class="btn btn-ghost btn-sm" id="mUrl" data-needs-idle>Mở trên web</button>
-    <button class="btn btn-danger btn-sm" id="mStop" data-needs-idle>Tắt máy</button></div></div>`;
+    <button class="btn btn-danger btn-sm" id="mStop" data-needs-idle>Tắt máy</button></div>
+    <div class="bars" id="mBars" style="margin-top:14px">${statsHtml(S.stats[S.cur])}</div></div>`;
+}
+function statsHtml(st) {
+  if (!st) return '<span class="hint">Bấm <b>Tài nguyên</b> để xem RAM, ổ đĩa và GPU của máy này.</span>';
+  if (st.loading) return '<span class="hint">Đang đo trên máy Colab…</span>';
+  if (!st.ok) return `<span class="hint" style="color:var(--err)">Không đo được: ${esc((st.text || '').trim().split('\n').pop())}</span>`;
+  const bar = (label, used, total, unit = gb) => { const p = total ? Math.min(100, Math.round((used / total) * 100)) : 0; return `<div class="bar"><div class="t"><span>${label}</span><span><b>${unit(used)}</b> / ${unit(total)} · ${p}%</span></div><div class="track"><i class="${p > 85 ? 'hot' : ''}" style="width:${p}%"></i></div></div>`; };
+  const mb = (x) => fmt(Number(x), 0) + ' MB';
+  return [
+    st.ramTotal ? bar('RAM', st.ramUsed, st.ramTotal) : '',
+    st.diskTotal ? bar('Ổ đĩa /content', st.diskUsed, st.diskTotal) : '',
+    ...(st.gpus || []).map((g) => bar(`GPU ${esc(g.name)} · đang dùng ${esc(g.util)}%`, Number(g.memUsed), Number(g.memTotal), mb)),
+    `<span class="hint">${st.cpus || '?'} nhân CPU${(st.gpus || []).length ? '' : ' · không có GPU'} · đo lúc ${esc(st.at)}</span>`,
+  ].join('');
+}
+async function loadStats(name) {
+  S.stats[name] = { loading: true }; if ($('#mBars')) $('#mBars').innerHTML = statsHtml(S.stats[name]);
+  const st = await api.machine_stats(name); st.at = new Date().toLocaleTimeString('vi-VN');
+  S.stats[name] = st; if (S.cur === name && $('#mBars')) $('#mBars').innerHTML = statsHtml(st);
 }
 function bindMachineBar() {
   if (!S.cur) return;
+  $('#mStats').onclick = () => { if (needAuth()) loadStats(S.cur); };
   $('#mStatus').onclick = () => run(['status', ...sArg()], { label: 'trạng thái' });
   $('#mRestart').onclick = () => run(['restart-kernel', ...sArg()], { label: 'khởi động lại kernel' });
   $('#mUrl').onclick = () => run(['url', ...sArg(), '--open'], { label: 'mở trên web' });
-  $('#mStop').onclick = async () => { if (!confirm(`Tắt máy "${S.cur}"? Dữ liệu chưa tải về trên máy ảo sẽ mất.`)) return; const r = await run(['stop', ...sArg()], { label: 'tắt máy' }); if (r && r.code === 0) { S.cur = null; } await loadMachines(); draw(); };
+  $('#mStop').onclick = async () => { if (!confirm(`Tắt máy "${S.cur}"? Dữ liệu chưa tải về trên máy ảo sẽ mất.`)) return; const r = await run(['stop', ...sArg()], { label: 'tắt máy' }); if (r && r.code === 0) { S.cur = null; } await loadMachines(); draw(); loadAccount(true); };
 }
 
 function drawRun(v) {
@@ -394,15 +474,8 @@ function drawDrive(v) {
 // ---------- chung ----------
 $('#btnCancel').onclick = () => { if (S.job) api.cancel(S.job); };
 $('#btnClear').onclick = () => { $('#log').textContent = ''; };
-$('#btnUsage').onclick = async () => {
-  if (!needAuth()) return;
-  $('#usageSub').textContent = 'Đang hỏi Colab…';
-  const r = await api.capture(['usage'], 60);
-  const t = r.text.trim(); log('› colab usage', 'cmd'); log(t, r.code === 0 ? '' : 'bad');
-  const num = t.match(/(?:balance|còn|remaining)[^\d]*([\d.,]+)/i) || t.match(/([\d.,]+)\s*(?:compute units|CU)/i);
-  $('#usageBig').textContent = num ? num[1] : (r.code === 0 ? 'xem kết quả' : 'lỗi');
-  $('#usageSub').textContent = r.code === 0 ? 'Chi tiết ở khung Kết quả' : 'Không lấy được — xem khung Kết quả';
-};
+$('#btnUsage').onclick = () => { if (needAuth()) loadAccount(); };
+$('#usageCard').onclick = () => { document.querySelector('#tabs [data-v="acct"]').click(); };
 $('#btnPay').onclick = () => run(['pay'], { label: 'mua thêm' });
 document.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => { b.closest('.modal').hidden = true; }; });
 
@@ -411,7 +484,7 @@ window.addEventListener('pywebviewready', async () => {
   await refreshAuth();
   await loadMachines();
   draw();
-  if (!S.signedIn) openAuth(); else syncServer();
+  if (!S.signedIn) openAuth(); else { syncServer(); loadAccount(); }
 });
 </script>
 </body>

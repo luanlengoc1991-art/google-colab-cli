@@ -140,6 +140,90 @@ class Api:
             pass
         return {"ok": True, "signedIn": self._signed_in()}
 
+    # ---------- tài khoản: gói, đơn vị tính toán, GPU được dùng (đọc thẳng máy chủ Colab) ----------
+    def _client(self):
+        from colab_cli.common import state
+
+        return state.client
+
+    def account(self) -> dict:
+        """Số dư / tốc độ tiêu đơn vị tính toán, máy đang chạy, GPU · TPU được dùng, email.
+        Gọi /tun/m/ccu-info và /tun/m/assignments của Colab (giống CLI) nhưng giữ cả các trường CLI bỏ qua."""
+        if not self._signed_in():
+            return {"signedIn": False}
+        from urllib.parse import urljoin
+
+        try:
+            cl = self._client()
+            raw = cl._issue_request(urljoin(cl.colab_domain, "/tun/m/ccu-info"), schema=dict) or {}
+            asg = (cl._issue_request(urljoin(cl.colab_domain, "/tun/m/assignments"), schema=dict) or {}).get("assignments") or []
+        except Exception as e:
+            return {"signedIn": True, "error": str(e)[:400]}
+        bal = float(raw.get("currentBalance") or 0)
+        rate = float(raw.get("consumptionRateHourly") or 0)
+        gpus = [str(g) for g in raw.get("eligibleGpus") or []]
+        tpus = [str(t) for t in raw.get("eligibleTpus") or []]
+        # Colab không trả tên gói: suy ra từ quyền dùng GPU và số dư (ghi rõ là ước đoán)
+        if "A100" in gpus or "H100" in gpus:
+            plan = "Có trả phí — Colab Pro / Pro+ hoặc mua thêm đơn vị (dùng được GPU cao cấp)"
+        elif bal > 0:
+            plan = "Có đơn vị tính toán trả phí"
+        else:
+            plan = "Miễn phí (GPU T4 theo hạn mức của Google)"
+        machines = []
+        for a in asg:
+            machines.append({k: a.get(k) for k in ("endpoint", "accelerator", "variant", "machineShape") if k in a})
+        return {
+            "signedIn": True, "email": self._email(), "balance": round(bal, 2), "rate": round(rate, 2),
+            "hoursLeft": round(bal / rate, 1) if rate > 0 else None, "assignments": int(raw.get("assignmentsCount") or len(asg)),
+            "machines": machines, "eligibleGpus": gpus, "ineligibleGpus": [str(g) for g in raw.get("ineligibleGpus") or []],
+            "eligibleTpus": tpus, "ineligibleTpus": [str(t) for t in raw.get("ineligibleTpus") or []],
+            "plan": plan, "planGuessed": True,
+            "extra": {k: v for k, v in raw.items() if k not in ("currentBalance", "consumptionRateHourly", "assignmentsCount", "eligibleGpus", "ineligibleGpus", "eligibleTpus", "ineligibleTpus")},
+            "at": time.strftime("%H:%M:%S"),
+        }
+
+    def _email(self) -> str | None:
+        """Email tài khoản Google đang đăng nhập (userinfo, dùng phiên đã xác thực của CLI)."""
+        if getattr(self, "_email_cache", None):
+            return self._email_cache
+        try:
+            r = self._client().session.get("https://www.googleapis.com/oauth2/v3/userinfo", timeout=15)
+            self._email_cache = r.json().get("email") if r.ok else None
+        except Exception:
+            self._email_cache = None
+        return self._email_cache
+
+    STATS_CODE = r"""
+import json, os, shutil, subprocess
+def _mb(n): return round(n / 1048576)
+out = {"cpus": os.cpu_count()}
+try:
+    t = {}
+    for line in open('/proc/meminfo'):
+        k, v = line.split(':'); t[k] = int(v.split()[0]) * 1024
+    out["ramTotal"], out["ramUsed"] = _mb(t['MemTotal']), _mb(t['MemTotal'] - t.get('MemAvailable', t['MemFree']))
+except Exception: pass
+try:
+    d = shutil.disk_usage('/content'); out["diskTotal"], out["diskUsed"] = _mb(d.total), _mb(d.used)
+except Exception: pass
+try:
+    q = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total,memory.used,utilization.gpu', '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=10).stdout.strip()
+    out["gpus"] = [dict(zip(['name', 'memTotal', 'memUsed', 'util'], [x.strip() for x in l.split(',')])) for l in q.splitlines() if l.strip()]
+except Exception: out["gpus"] = []
+print('@@STATS@@' + json.dumps(out))
+"""
+
+    def machine_stats(self, session: str) -> dict:
+        """RAM, ổ đĩa /content, GPU (bộ nhớ, % dùng) của một máy: chạy một đoạn code nhỏ trên máy đó."""
+        r = self.capture(["exec", "-s", session, "--timeout", "60"], timeout=120, stdin_text=self.STATS_CODE)
+        m = re.search(r"@@STATS@@(\{.*\})", r["text"])
+        if not m:
+            return {"ok": False, "text": r["text"][-600:]}
+        data = json.loads(m.group(1))
+        data["ok"] = True
+        return data
+
     # ---------- máy (session) ----------
     def sessions(self) -> list[dict]:
         """Máy đã tạo từ máy tính này (đọc nhanh tệp trạng thái của CLI, không gọi mạng)."""
@@ -227,11 +311,12 @@ class Api:
             pass
         return True
 
-    def capture(self, args: list, timeout: float = 120) -> dict:
+    def capture(self, args: list, timeout: float = 120, stdin_text: str | None = None) -> dict:
         """Chạy `colab <args>` và chờ xong, trả toàn bộ chữ (cho danh sách tệp, đối chiếu máy…)."""
         try:
             r = subprocess.run(cli_argv([str(a) for a in args]), capture_output=True, env=cli_env(), timeout=timeout,
-                               creationflags=NO_WINDOW, stdin=subprocess.DEVNULL, cwd=str(Path.home()))
+                               creationflags=NO_WINDOW, cwd=str(Path.home()),
+                               **({"input": stdin_text.encode("utf-8")} if stdin_text is not None else {"stdin": subprocess.DEVNULL}))
             text = ANSI.sub("", (r.stdout + r.stderr).decode("utf-8", "replace"))
             return {"code": r.returncode, "text": text}
         except subprocess.TimeoutExpired:
