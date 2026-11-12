@@ -110,6 +110,11 @@
   .log .ok { color: var(--mint); }
   .log .bad { color: var(--err); }
   .log .note { color: var(--dim); }
+  .log a { color: var(--teal); text-decoration: underline; cursor: pointer; word-break: break-all; }
+  .inbar { display: flex; gap: 10px; align-items: center; padding: 8px 22px; border-top: 1px solid var(--line); background: #0b0b0b; }
+  .warnbox { padding: 12px 14px; border-radius: 16px; border: 1px solid rgba(246,188,23,.4); background: rgba(246,188,23,.07); color: #ffe08a; font-size: 13px; line-height: 1.5; }
+  .modal .box.wide { width: min(1100px, 94vw); }
+  textarea.code.tall { min-height: 56vh; }
   .running { position: relative; }
   .running::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: var(--grad); animation: bar 1.4s linear infinite; transform-origin: left; }
   @keyframes bar { 0% { transform: scaleX(0); opacity: 1 } 80% { transform: scaleX(1); opacity: 1 } 100% { transform: scaleX(1); opacity: 0 } }
@@ -152,11 +157,13 @@
     <div class="grow"></div>
     <button class="pill" id="pillAuth" title="Đăng nhập tài khoản Google dùng Colab"><span class="dot" id="authDot"></span><span id="authText">Đang kiểm tra…</span></button>
     <button class="pill" id="pillRefresh" title="Đối chiếu danh sách máy với Colab">↻ Làm mới</button>
+    <button class="pill" id="pillSet" title="Cài đặt, lối tắt, cập nhật">⚙ Cài đặt</button>
   </header>
 
   <aside>
     <div class="side-head"><h3>Máy Colab</h3><button class="btn btn-primary btn-sm" id="btnNew">+ Máy mới</button></div>
     <div class="machines" id="machines"></div>
+    <div style="padding:0 12px 10px"><div class="warnbox" id="orphanBox" hidden></div></div>
     <div class="side-foot">
       <div class="usage" id="usageCard" style="cursor:pointer" title="Xem chi tiết tài khoản"><small>Đơn vị tính toán còn lại</small><div class="big" id="usageBig">—</div><small id="usageSub">Đang đọc…</small></div>
       <div class="row"><button class="btn btn-ghost btn-sm" id="btnUsage">Làm mới</button><button class="btn btn-ghost btn-sm" id="btnPay">Mua thêm</button></div>
@@ -182,6 +189,12 @@
         <button class="btn btn-danger btn-sm" id="btnCancel" hidden>Dừng lệnh</button>
         <button class="btn btn-ghost btn-sm" id="btnClear">Xoá</button></div>
       <div class="log" id="log"><span class="note">Kết quả các lệnh hiện ở đây.</span></div>
+      <div class="inbar" id="inbar" hidden>
+        <span class="hint">Lệnh đang chờ bạn nhập:</span>
+        <input class="input" id="inText" placeholder="Dán mã xác thực rồi bấm Gửi (hoặc để trống và bấm Enter)" style="flex:1">
+        <button class="btn btn-primary btn-sm" id="inSend">Gửi</button>
+        <button class="btn btn-ghost btn-sm" id="inEnter" title="Gửi phím Enter (sau khi đã cấp quyền trên trình duyệt)">Enter ↵</button>
+      </div>
     </section>
   </main>
 </div>
@@ -203,6 +216,24 @@
   <div class="row"><button class="btn btn-ghost" id="authOpen">Mở trang đăng nhập</button><span class="hint" id="authHint"></span></div>
   <div class="row"><input class="input" id="authCode" placeholder="Dán mã xác thực của Google vào đây" style="flex:1"></div>
   <div class="row" style="margin-top:18px"><button class="btn btn-ghost" id="authOut" hidden>Đăng xuất</button><div class="grow"></div><button class="btn btn-ghost" data-close>Đóng</button><button class="btn btn-primary" id="authGo">Xác nhận</button></div>
+</div></div>
+
+<!-- sửa tệp trên máy Colab -->
+<div class="modal" id="mEdit" hidden><div class="box wide">
+  <h3>Sửa tệp</h3>
+  <p class="crumb" id="edTitle"></p>
+  <textarea class="code tall" id="edText" spellcheck="false"></textarea>
+  <div class="row" style="margin-top:14px"><span class="hint">Ctrl + S để lưu</span><div class="grow"></div><button class="btn btn-ghost" id="edClose">Đóng</button><button class="btn btn-ghost" id="edSave">Lưu</button><button class="btn btn-primary" id="edSaveClose">Lưu &amp; đóng</button></div>
+</div></div>
+
+<!-- cài đặt -->
+<div class="modal" id="mSet" hidden><div class="box">
+  <h3>Cài đặt &amp; thông tin</h3>
+  <p id="setInfo">—</p>
+  <div class="row"><button class="btn btn-ghost" id="setShort">Tạo lối tắt Desktop &amp; Start Menu</button></div>
+  <div class="row"><button class="btn btn-ghost" id="setUpd">Kiểm tra bản Colab CLI mới</button></div>
+  <div class="row"><button class="btn btn-ghost" id="setHelp">Hướng dẫn dùng Colab CLI</button></div>
+  <div class="row" style="margin-top:18px"><button class="btn btn-ghost" data-close>Đóng</button></div>
 </div></div>
 
 <div class="toast" id="toast" hidden></div>
@@ -238,17 +269,30 @@ function needAuth() { if (!S.signedIn) { openAuth(); toast('Đăng nhập Google
 
 // chạy một lệnh colab thật, chờ kết thúc
 const waiters = {};
-function run(args, { stdin = null, label = '' } = {}) {
+function run(args, { stdin = null, label = '', interactive = false } = {}) {
   if (S.job) { toast('Đang chạy một lệnh, chờ xong hoặc bấm Dừng lệnh'); return Promise.resolve(null); }
-  return api.run(args, stdin, label).then(({ id }) => { S.job = id; busy(true, label || args[0]); return new Promise((res) => { waiters[id] = res; }); });
+  return api.run(args, stdin, label, interactive).then(({ id }) => { S.job = id; busy(true, label || args[0]); return new Promise((res) => { waiters[id] = res; }); });
 }
+function logLink(url) {
+  const el = $('#log'); const s = document.createElement('div');
+  s.append('🔗 Mở trang Google: '); const a = document.createElement('a'); a.textContent = url; a.onclick = () => api.open_url(url); s.append(a);
+  el.append(s); el.scrollTop = el.scrollHeight;
+}
+async function sendInput(text) {
+  if (!S.job) return;
+  const ok = await api.send_input(S.job, text);
+  if (ok) { log(text ? '› (đã gửi mã)' : '› (đã gửi Enter)', 'note'); $('#inText').value = ''; } else toast('Lệnh này không nhận dữ liệu nhập');
+}
+$('#inSend').onclick = () => sendInput($('#inText').value.trim());
+$('#inEnter').onclick = () => sendInput('');
+$('#inText').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); sendInput($('#inText').value.trim()); } };
 window.studio = { on(kind, d) {
-  if (kind === 'start') log('› colab ' + d.args.join(' '), 'cmd');
+  if (kind === 'start') { log('› colab ' + d.args.join(' '), 'cmd'); $('#inbar').hidden = !d.interactive; }
   else if (kind === 'line') log(d.text, /error|lỗi|failed|traceback|exception/i.test(d.text) ? 'bad' : '');
-  else if (kind === 'auth') { log('Cần đăng nhập Google — mở hộp Đăng nhập.', 'bad'); }
+  else if (kind === 'link') logLink(d.url);
   else if (kind === 'end') {
     log(d.code === 0 ? `✓ Xong (${d.seconds}s)` : `✗ Lỗi (mã ${d.code}, ${d.seconds}s)`, d.code === 0 ? 'ok' : 'bad');
-    if (S.job === d.id) { S.job = null; busy(false); }
+    if (S.job === d.id) { S.job = null; busy(false); $('#inbar').hidden = true; }
     waiters[d.id]?.(d); delete waiters[d.id];
   }
 } };
@@ -299,8 +343,27 @@ async function syncServer() {
   const r = await api.server_sessions();
   $('#pillRefresh').textContent = '↻ Làm mới';
   await loadMachines();
-  if (r.code === 0) toast(r.rows.length ? `Colab đang có ${r.rows.length} máy chạy trên tài khoản` : 'Tài khoản Colab chưa có máy nào đang chạy');
-  else log(r.text.trim(), 'bad');
+  if (r.code === 0) {
+    S.server = r.rows; drawOrphans();
+    const orph = r.rows.filter((x) => x.orphan).length;
+    toast(r.rows.length ? `Colab đang có ${r.rows.length} máy chạy trên tài khoản${orph ? ` — ${orph} máy mồ côi vẫn đang tính tiền` : ''}` : 'Tài khoản Colab chưa có máy nào đang chạy');
+    if (S.view === 'acct') draw();
+  } else log(r.text.trim(), 'bad');
+}
+S.server = [];
+function drawOrphans() {
+  const n = S.server.filter((x) => x.orphan).length;
+  $('#orphanBox').hidden = !n;
+  $('#orphanBox').innerHTML = `⚠ ${n} máy đang chạy trên Colab mà app không quản lý (vẫn tính đơn vị). <a style="color:var(--warn);text-decoration:underline;cursor:pointer" id="orphanGo">Xem &amp; tắt</a>`;
+  if (n) $('#orphanGo').onclick = () => document.querySelector('#tabs [data-v="acct"]').click();
+}
+async function stopEndpoint(ep, label) {
+  if (!confirm(`Tắt máy ${label || ep}? Mọi dữ liệu chưa lưu trên máy đó sẽ mất.`)) return;
+  busy(true, 'tắt máy'); const r = await api.unassign(ep); busy(false);
+  if (!r.ok) { log('Không tắt được: ' + r.error, 'bad'); return; }
+  log('✓ Đã tắt máy ' + (label || ep), 'ok'); toast('Đã tắt máy');
+  if (S.cur && !(await api.sessions()).some((m) => m.name === S.cur)) S.cur = null;
+  await syncServer(); loadAccount(true); draw();
 }
 $('#pillRefresh').onclick = syncServer;
 
@@ -352,7 +415,14 @@ function drawAcct(v) {
     <div><b>GPU</b><div class="gl">${chips(a.eligibleGpus, a.ineligibleGpus)}</div></div>
     <div style="margin-top:12px"><b>TPU</b><div class="gl">${chips(a.eligibleTpus, a.ineligibleTpus)}</div></div>
     <p class="sub" style="margin:12px 0 0">Gạch ngang: tài khoản chưa được dùng loại này. Máy nào chạy cũng tiêu đơn vị theo giờ — xong việc nhớ <b>Tắt máy</b>.</p></div>
-  ${a.machines.length ? `<div class="card"><h2>Máy đang <em>tính tiền</em></h2>${a.machines.map((m) => `<div class="frow"><span class="n">${esc(m.endpoint || '')}</span><span class="tag gpu">${esc(m.accelerator || '')}</span><span class="tag">${esc(m.machineShape || m.variant || '')}</span></div>`).join('')}</div>` : ''}`;
+  <div class="card"><div class="row"><div style="flex:1"><h2>Máy đang <em>tính tiền</em></h2><p class="sub" style="margin:0">Mọi máy đang chạy trên tài khoản Colab, kể cả máy tạo ở nơi khác hoặc bị mất hồ sơ (mồ côi).</p></div>
+    <button class="btn btn-ghost btn-sm" id="acSync">Đối chiếu với Colab</button></div>
+    <div class="files">${S.server.length ? S.server.map((m) => `<div class="frow"><span class="n">${m.orphan ? '<b style="color:var(--warn)">mồ côi</b> · ' : `<b>${esc(m.name)}</b> · `}${esc(m.endpoint)}</span>
+      <span class="tag ${m.accelerator !== 'CPU' ? 'gpu' : ''}">${esc(m.accelerator)}</span><span class="tag">${esc(m.shape)}</span>
+      <button class="btn btn-danger btn-sm" data-ep="${esc(m.endpoint)}" data-lb="${esc(m.orphan ? m.endpoint : m.name)}" data-needs-idle>Tắt</button></div>`).join('')
+      : '<div class="frow"><span class="n" style="color:var(--dim)">Không có máy nào (bấm Đối chiếu với Colab để kiểm tra lại)</span></div>'}</div></div>`;
+  $('#acSync').onclick = syncServer;
+  v.querySelectorAll('[data-ep]').forEach((b) => { b.onclick = () => stopEndpoint(b.dataset.ep, b.dataset.lb); });
   $('#acRefresh').onclick = () => loadAccount();
   $('#acPay').onclick = () => run(['pay'], { label: 'mua thêm' });
 }
@@ -398,10 +468,12 @@ function bindMachineBar() {
 function drawRun(v) {
   v.innerHTML = machineBar() + `
   <div class="card"><h2>Chạy <em>code Python</em></h2><p class="sub">Gõ code rồi bấm Chạy — chạy trên máy đang chọn, giữ biến giữa các lần chạy như notebook. Dòng bắt đầu bằng <b>!</b> là lệnh shell (vd <code>!nvidia-smi</code>).</p>
-    <textarea class="code" id="code" spellcheck="false">import torch, platform
-print("Python", platform.python_version())
-print("GPU:", torch.cuda.is_available() and torch.cuda.get_device_name(0))</textarea>
-    <div class="row"><button class="btn btn-primary" id="runCode" data-needs-idle>▶ Chạy</button><span class="hint">Ctrl + Enter để chạy</span></div></div>
+    <textarea class="code" id="code" spellcheck="false"></textarea>
+    <div class="row"><button class="btn btn-primary" id="runCode" data-needs-idle>▶ Chạy</button><span class="hint">Ctrl + Enter để chạy · code tự lưu</span><div class="grow"></div>
+      <button class="btn btn-ghost btn-sm" id="codeOpen">Mở tệp .py…</button><button class="btn btn-ghost btn-sm" id="codeSave">Lưu ra tệp…</button></div></div>
+  <div class="card"><h2>Lệnh <em>shell</em></h2><p class="sub">Chạy một lệnh Linux trên máy đang chọn (như Terminal của Colab).</p>
+    <div class="row"><input class="input" id="sh" placeholder="vd: nvidia-smi   ·   df -h   ·   ls -la /content   ·   pip list" style="flex:1;font-family:var(--mono)"><button class="btn btn-primary" id="shGo" data-needs-idle>Chạy lệnh</button></div>
+    <div class="row"><div class="chips">${['nvidia-smi', 'df -h /content', 'free -h', 'ls -la /content', 'python --version', 'pip list'].map((c) => `<button class="chip" data-sh="${esc(c)}">${esc(c)}</button>`).join('')}</div></div></div>
   <div class="card"><h2>Chạy <em>tệp</em> .py / .ipynb</h2><p class="sub">Chọn tệp trên máy tính; app gửi nội dung lên máy Colab và chạy (notebook: kết quả ghi lại vào tệp).</p>
     <div class="row"><button class="btn btn-ghost" id="pickRun">Chọn tệp…</button><span class="file" id="runFileName">${esc(S.file || 'Chưa chọn tệp')}</span></div>
     <div class="row"><button class="btn btn-primary" id="runFile" data-needs-idle>▶ Chạy trên máy đang chọn</button></div></div>
@@ -414,7 +486,16 @@ print("GPU:", torch.cuda.is_available() and torch.cuda.get_device_name(0))</text
   drawHw('#runHw', 'runHw');
   const go = () => { if (!needAuth() || !needMachine()) return; run(['exec', ...sArg(), '--timeout', '0'], { stdin: $('#code').value, label: 'chạy code' }).then(loadMachines); };
   $('#runCode').onclick = go;
-  $('#code').onkeydown = (e) => { if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); go(); } if (e.key === 'Tab') { e.preventDefault(); const t = e.target, p = t.selectionStart; t.setRangeText('    ', p, t.selectionEnd, 'end'); } };
+  const DEF = 'import torch, platform\nprint("Python", platform.python_version())\nprint("GPU:", torch.cuda.is_available() and torch.cuda.get_device_name(0))';
+  $('#code').value = localStorage.getItem('studio.code') ?? DEF;
+  $('#code').oninput = () => localStorage.setItem('studio.code', $('#code').value);
+  $('#codeOpen').onclick = async () => { const f = await api.pick_file('code'); if (!f) return; if (/\.ipynb$/i.test(f)) return toast('Notebook: dùng mục Chạy tệp bên dưới'); $('#code').value = await api.read_text(f); localStorage.setItem('studio.code', $('#code').value); };
+  $('#codeSave').onclick = async () => { const to = await api.save_file('code.py'); if (to) { await api.write_text(to, $('#code').value); toast('Đã lưu ' + to); } };
+  const sh = (cmd) => { cmd = (cmd || '').trim(); if (!cmd) return toast('Gõ lệnh shell'); if (!needAuth() || !needMachine()) return; run(['exec', ...sArg(), '--timeout', '0'], { stdin: '!' + cmd.replace(/\n/g, ' ; '), label: cmd }); };
+  $('#shGo').onclick = () => sh($('#sh').value);
+  $('#sh').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); sh($('#sh').value); } };
+  v.querySelectorAll('[data-sh]').forEach((c) => { c.onclick = () => { $('#sh').value = c.dataset.sh; sh(c.dataset.sh); }; });
+  $('#code').onkeydown =(e) => { if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); go(); } if (e.key === 'Tab') { e.preventDefault(); const t = e.target, p = t.selectionStart; t.setRangeText('    ', p, t.selectionEnd, 'end'); } };
   $('#pickRun').onclick = async () => { const f = await api.pick_file('code'); if (f) { S.file = f; $('#runFileName').textContent = f; } };
   $('#runFile').onclick = () => { if (!needAuth() || !needMachine()) return; if (!S.file) return toast('Chọn tệp trước'); run(['exec', ...sArg(), '-f', S.file, '--timeout', '0'], { label: 'chạy tệp' }).then(loadMachines); };
   $('#pickOnce').onclick = async () => { const f = await api.pick_file('code'); if (f) { S.runFile = f; $('#onceName').textContent = f; } };
@@ -426,29 +507,79 @@ print("GPU:", torch.cuda.is_available() and torch.cuda.get_device_name(0))</text
   };
 }
 
+// Contents API của Colab tính từ "/" — luôn nối sau "content" (giống content_path() bên Python)
+const cpath = (...parts) => ['content', ...parts.join('/').split('/').filter(Boolean)].join('/');
 async function drawFiles(v) {
   v.innerHTML = machineBar() + (S.cur ? `<div class="card"><h2>Tệp trên <em>máy Colab</em></h2>
     <div class="row"><span class="crumb">/content/${esc(S.cwd)}</span><div class="grow"></div>
       ${S.cwd ? '<button class="btn btn-ghost btn-sm" id="up">↑ Lên</button>' : ''}
-      <button class="btn btn-ghost btn-sm" id="reload">Làm mới</button><button class="btn btn-primary btn-sm" id="upload" data-needs-idle>Tải lên…</button></div>
-    <div class="files" id="flist"><div class="frow"><span class="n">Đang đọc…</span></div></div></div>` : '');
+      <button class="btn btn-ghost btn-sm" id="reload">Làm mới</button>
+      <button class="btn btn-ghost btn-sm" id="mkdir" data-needs-idle>+ Thư mục</button>
+      <button class="btn btn-ghost btn-sm" id="newf" data-needs-idle>+ Tệp mới</button>
+      <button class="btn btn-primary btn-sm" id="upload" data-needs-idle>Tải lên…</button></div>
+    <div class="files" id="flist"><div class="frow"><span class="n">Đang đọc…</span></div></div>
+    <p class="hint" style="margin:10px 0 0">Tệp trong /content mất khi tắt máy — tải về hoặc lưu sang Drive những gì cần giữ.</p></div>` : '');
   bindMachineBar();
   if (!S.cur) return;
+  const sess = S.cur;
   $('#reload').onclick = () => drawFiles(v);
   if ($('#up')) $('#up').onclick = () => { S.cwd = S.cwd.split('/').slice(0, -1).join('/'); drawFiles(v); };
-  $('#upload').onclick = async () => { const f = await api.pick_file('any'); if (!f) return; const name = f.split(/[\\/]/).pop(); const r = await run(['upload', ...sArg(), f, (S.cwd ? S.cwd + '/' : '') + name], { label: 'tải lên' }); if (r && r.code === 0) drawFiles(v); };
+  $('#upload').onclick = async () => {
+    const fs = await api.pick_files(); if (!fs.length) return;
+    for (const f of fs) { const r = await run(['upload', ...sArg(), f, cpath(S.cwd, f.split(/[\\/]/).pop())], { label: `tải lên ${fs.indexOf(f) + 1}/${fs.length}` }); if (!r || r.code !== 0) break; }
+    drawFiles(v);
+  };
+  $('#mkdir').onclick = async () => {
+    const n = prompt('Tên thư mục mới:'); if (!n || !n.trim()) return;
+    busy(true, 'tạo thư mục'); const r = await api.fs_op(sess, 'mkdir', cpath(S.cwd, n.trim())); busy(false);
+    if (!r.ok) log(r.error, 'bad'); drawFiles(v);
+  };
+  $('#newf').onclick = () => { const n = prompt('Tên tệp mới (vd: train.py):'); if (n && n.trim()) openEditor(sess, cpath(S.cwd, n.trim()), '', () => drawFiles(v)); };
   if (!needAuth()) return;
-  const r = await api.list_files(S.cur, S.cwd);
+  const r = await api.list_files(sess, S.cwd);
   const box = $('#flist'); if (!box) return;
   if (r.code !== 0) { box.innerHTML = `<div class="frow"><span class="n" style="color:var(--err)">${esc(r.text.trim() || 'Không đọc được')}</span></div>`; return; }
   if (!r.items.length) { box.innerHTML = '<div class="frow"><span class="n" style="color:var(--dim)">Thư mục trống</span></div>'; return; }
   box.innerHTML = r.items.map((it) => `<div class="frow"><span class="n ${it.dir ? 'dir' : ''}" data-n="${esc(it.name)}">${it.dir ? '📁 ' : ''}${esc(it.name)}</span>
-    ${it.dir ? '' : `<button class="btn btn-ghost btn-sm" data-dl="${esc(it.name)}" data-needs-idle>Tải về</button><button class="btn btn-danger btn-sm" data-rm="${esc(it.name)}" data-needs-idle>Xoá</button>`}</div>`).join('');
-  const full = (n) => (S.cwd ? S.cwd + '/' : '') + n;
-  box.querySelectorAll('.n.dir').forEach((el) => { el.onclick = () => { S.cwd = full(el.dataset.n); drawFiles(v); }; });
-  box.querySelectorAll('[data-dl]').forEach((b) => { b.onclick = async () => { const to = await api.save_file(b.dataset.dl); if (!to) return; const r2 = await run(['download', ...sArg(), full(b.dataset.dl), to], { label: 'tải về' }); if (r2 && r2.code === 0) toast('Đã tải về ' + to); }; });
-  box.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = async () => { if (!confirm('Xoá ' + b.dataset.rm + ' trên máy Colab?')) return; const r2 = await run(['rm', ...sArg(), full(b.dataset.rm)], { label: 'xoá tệp' }); if (r2 && r2.code === 0) drawFiles(v); }; });
+    ${it.dir ? `<button class="btn btn-danger btn-sm" data-rmd="${esc(it.name)}" data-needs-idle>Xoá thư mục</button>`
+      : `<button class="btn btn-ghost btn-sm" data-ed="${esc(it.name)}" data-needs-idle>Sửa</button><button class="btn btn-ghost btn-sm" data-dl="${esc(it.name)}" data-needs-idle>Tải về</button><button class="btn btn-danger btn-sm" data-rm="${esc(it.name)}" data-needs-idle>Xoá</button>`}</div>`).join('');
+  const rel = (n) => (S.cwd ? S.cwd + '/' : '') + n;
+  box.querySelectorAll('.n.dir').forEach((el) => { el.onclick = () => { S.cwd = rel(el.dataset.n); drawFiles(v); }; });
+  box.querySelectorAll('[data-ed]').forEach((b) => { b.onclick = async () => {
+    const p = cpath(S.cwd, b.dataset.ed); busy(true, 'mở tệp'); const t = await api.read_remote(sess, p); busy(false);
+    if (!t.ok) return toast(t.error, 7000); openEditor(sess, p, t.text, () => drawFiles(v));
+  }; });
+  box.querySelectorAll('[data-dl]').forEach((b) => { b.onclick = async () => { const to = await api.save_file(b.dataset.dl); if (!to) return; const r2 = await run(['download', ...sArg(), cpath(S.cwd, b.dataset.dl), to], { label: 'tải về' }); if (r2 && r2.code === 0) toast('Đã tải về ' + to); }; });
+  box.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = async () => { if (!confirm('Xoá ' + b.dataset.rm + ' trên máy Colab?')) return; const r2 = await run(['rm', ...sArg(), cpath(S.cwd, b.dataset.rm)], { label: 'xoá tệp' }); if (r2 && r2.code === 0) drawFiles(v); }; });
+  box.querySelectorAll('[data-rmd]').forEach((b) => { b.onclick = async () => {
+    if (!confirm(`Xoá thư mục "${b.dataset.rmd}" và MỌI tệp bên trong trên máy Colab?`)) return;
+    busy(true, 'xoá thư mục'); const r2 = await api.fs_op(sess, 'rmdir', cpath(S.cwd, b.dataset.rmd)); busy(false);
+    if (!r2.ok) log(r2.error, 'bad'); drawFiles(v);
+  }; });
 }
+
+// ---------- trình sửa tệp trên máy Colab ----------
+let edCtx = null;
+function openEditor(sess, path, text, after) {
+  edCtx = { sess, path, after, orig: text };
+  $('#edTitle').textContent = '/' + path; $('#edText').value = text; $('#mEdit').hidden = false; $('#edText').focus();
+}
+async function saveEditor(close) {
+  if (!edCtx) return;
+  $('#edSave').disabled = true; $('#edSaveClose').disabled = true;
+  const r = await api.write_remote(edCtx.sess, edCtx.path, $('#edText').value);
+  $('#edSave').disabled = false; $('#edSaveClose').disabled = false;
+  if (!r.ok) return toast('Chưa lưu được: ' + r.error, 8000);
+  edCtx.orig = $('#edText').value; toast('Đã lưu lên máy Colab');
+  if (close) { $('#mEdit').hidden = true; edCtx.after?.(); edCtx = null; }
+}
+$('#edSave').onclick = () => saveEditor(false);
+$('#edSaveClose').onclick = () => saveEditor(true);
+$('#edClose').onclick = () => { if (edCtx && $('#edText').value !== edCtx.orig && !confirm('Đóng mà không lưu thay đổi?')) return; $('#mEdit').hidden = true; edCtx?.after?.(); edCtx = null; };
+$('#edText').onkeydown = (e) => {
+  if (e.key === 's' && e.ctrlKey) { e.preventDefault(); saveEditor(false); }
+  if (e.key === 'Tab') { e.preventDefault(); const t = e.target, p = t.selectionStart; t.setRangeText('    ', p, t.selectionEnd, 'end'); }
+};
 
 function drawPkgs(v) {
   v.innerHTML = machineBar() + `<div class="card"><h2>Cài <em>thư viện Python</em></h2><p class="sub">Cài lên máy đang chọn bằng uv (nhanh), không được thì pip.</p>
@@ -460,13 +591,17 @@ function drawPkgs(v) {
 }
 
 function drawDrive(v) {
-  v.innerHTML = machineBar() + `<div class="card"><h2>Google <em>Drive</em></h2><p class="sub">Gắn Drive của bạn vào máy Colab tại <code>/content/drive</code> để đọc / ghi tệp trực tiếp.</p>
-    <div class="row"><button class="btn btn-primary" id="dm" data-needs-idle>Gắn Drive</button><button class="btn btn-ghost" id="gcp" data-needs-idle>Cấp quyền Google Cloud cho máy</button></div></div>
+  v.innerHTML = machineBar() + `<div class="card"><h2>Google <em>Drive</em></h2><p class="sub">Gắn Drive của bạn vào máy Colab tại <code>/content/drive</code> để đọc / ghi tệp trực tiếp.<br>
+    Lần đầu Google mở trang xin quyền: đồng ý trên trình duyệt rồi bấm <b>Enter ↵</b> ở khung Kết quả bên dưới.</p>
+    <div class="row"><button class="btn btn-primary" id="dm" data-needs-idle>Gắn Drive</button></div></div>
+  <div class="card"><h2>Quyền <em>Google Cloud</em> cho máy</h2><p class="sub">Cho code trên máy Colab dùng gcloud, BigQuery, Cloud Storage bằng tài khoản của bạn.<br>
+    Bấm đường dẫn hiện ở khung Kết quả, đăng nhập, chép <b>mã xác thực</b> rồi dán vào ô nhập bên dưới và bấm <b>Gửi</b>.</p>
+    <div class="row"><button class="btn btn-ghost" id="gcp" data-needs-idle>Cấp quyền Google Cloud</button></div></div>
   <div class="card"><h2>Nhật ký <em>phiên làm việc</em></h2><p class="sub">Xuất toàn bộ code và kết quả đã chạy trên máy này ra tệp (.ipynb, .md, .txt, .jsonl).</p>
     <div class="row"><button class="btn btn-ghost" id="lgShow" data-needs-idle>Xem 20 mục gần nhất</button><button class="btn btn-primary" id="lgSave" data-needs-idle>Xuất ra tệp…</button></div></div>`;
   bindMachineBar();
-  $('#dm').onclick = () => { if (needAuth() && needMachine()) run(['drivemount', ...sArg()], { label: 'gắn Drive' }); };
-  $('#gcp').onclick = () => { if (needAuth() && needMachine()) run(['auth', ...sArg()], { label: 'cấp quyền GCP' }); };
+  $('#dm').onclick = () => { if (needAuth() && needMachine()) run(['drivemount', ...sArg()], { label: 'gắn Drive', interactive: true }); };
+  $('#gcp').onclick = () => { if (needAuth() && needMachine()) run(['auth', ...sArg()], { label: 'cấp quyền GCP', interactive: true }); };
   $('#lgShow').onclick = () => { if (needMachine()) run(['log', ...sArg(), '-n', '20'], { label: 'nhật ký' }); };
   $('#lgSave').onclick = async () => { if (!needMachine()) return; const to = await api.save_file(`${S.cur}-nhat-ky.ipynb`); if (to) { const r = await run(['log', ...sArg(), '-o', to], { label: 'xuất nhật ký' }); if (r && r.code === 0) api.open_path(to); } };
 }
@@ -477,6 +612,14 @@ $('#btnClear').onclick = () => { $('#log').textContent = ''; };
 $('#btnUsage').onclick = () => { if (needAuth()) loadAccount(); };
 $('#usageCard').onclick = () => { document.querySelector('#tabs [data-v="acct"]').click(); };
 $('#btnPay').onclick = () => run(['pay'], { label: 'mua thêm' });
+$('#pillSet').onclick = async () => {
+  const i = await api.info();
+  $('#setInfo').innerHTML = `Colab Studio · Colab CLI <b>${esc(i.cli)}</b><br>Tệp trạng thái máy: <code>${esc(i.stateFile)}</code><br>Token Google lưu trong Windows Credential Manager (<code>google-colab-cli</code>), dùng chung với lệnh <code>colab</code>.`;
+  $('#mSet').hidden = false;
+};
+$('#setShort').onclick = async () => { const r = await api.create_shortcuts(); toast(r.ok ? 'Đã tạo lối tắt trên Desktop và Start Menu' : 'Chưa tạo được: ' + r.error, 7000); };
+$('#setUpd').onclick = () => { $('#mSet').hidden = true; run(['update'], { label: 'kiểm tra cập nhật' }); };
+$('#setHelp').onclick = () => { $('#mSet').hidden = true; run(['readme'], { label: 'hướng dẫn' }); };
 document.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => { b.closest('.modal').hidden = true; }; });
 
 window.addEventListener('pywebviewready', async () => {

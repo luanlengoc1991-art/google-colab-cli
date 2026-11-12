@@ -40,14 +40,51 @@ def cli_env() -> dict:
 
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-URL = re.compile(r"https://\S+")
+URL = re.compile(r"https://[^\s'\"<>]+")
+SESSION_LINE = re.compile(
+    r"\[(.+?)\]\s+(\S+)\s*\|\s*Hardware:\s*([^|]+)\|\s*Shape:\s*([^|]+)\|\s*Variant:\s*([^|]+)(?:\|\s*Status:\s*(.+))?"
+)
+
+
+def content_path(cwd: str = "", name: str = "") -> str:
+    """Đường dẫn cho Jupyter Contents API của Colab. API tính từ gốc "/" của máy ảo, còn app chỉ hiện /content,
+    nên mọi đường dẫn đều nối sau "content"."""
+    return "/".join(["content"] + [x for x in f"{cwd}/{name}".split("/") if x])
+
+
+def parse_sessions(text: str) -> list[dict]:
+    """Đọc kết quả `colab sessions`. Tên "?" là máy mồ côi: vẫn chạy (và tính tiền) trên Colab nhưng máy tính
+    này không còn hồ sơ của nó."""
+    rows = []
+    for line in text.splitlines():
+        m = SESSION_LINE.match(line.strip())
+        if m:
+            name = m.group(1).strip()
+            rows.append({"name": name, "endpoint": m.group(2), "accelerator": m.group(3).strip(),
+                         "shape": m.group(4).strip(), "variant": m.group(5).strip(),
+                         "status": (m.group(6) or "").strip(), "orphan": name == "?"})
+    return rows
+
+
+def fs_code(op: str, path: str) -> str:
+    """Code Python chạy trên máy Colab để tạo / xoá thư mục (Contents API không xoá được thư mục còn tệp).
+    Đường dẫn đưa vào bằng repr() nên tên có dấu cách, dấu nháy, chữ Việt đều an toàn."""
+    full = "/" + path.strip("/")
+    if op == "mkdir":
+        return f"import os\nos.makedirs({full!r}, exist_ok=True)\nprint('@@OK@@')"
+    if op == "rmdir":
+        if full.rstrip("/") in ("", "/content"):
+            raise ValueError("Không xoá thư mục gốc /content")
+        return f"import shutil\nshutil.rmtree({full!r})\nprint('@@OK@@')"
+    raise ValueError(f"Thao tác không hỗ trợ: {op}")
 
 
 class Job:
-    def __init__(self, job_id: str, args: list[str], proc: subprocess.Popen):
+    def __init__(self, job_id: str, args: list[str], proc: subprocess.Popen, interactive: bool = False):
         self.id = job_id
         self.args = args
         self.proc = proc
+        self.interactive = interactive
         self.started = time.time()
         self.lines: list[str] = []
 
@@ -242,19 +279,23 @@ print('@@STATS@@' + json.dumps(out))
             return [{"error": str(e)}]
 
     # ---------- chạy lệnh colab ----------
-    def run(self, args: list, stdin_text: str | None = None, label: str = "") -> dict:
-        """Chạy `colab <args>` thật; kết quả từng dòng đẩy lên giao diện. Trả job id."""
+    def run(self, args: list, stdin_text: str | None = None, label: str = "", interactive: bool = False) -> dict:
+        """Chạy `colab <args>` thật; kết quả từng dòng đẩy lên giao diện. Trả job id.
+
+        interactive=True giữ stdin mở để người dùng gửi Enter / mã xác thực: gắn Drive và cấp quyền GCP chờ đúng
+        việc này (trước đây stdin bị đóng nên hai lệnh đó không thể xong)."""
         args = [str(a) for a in (args or [])]
         job_id = uuid.uuid4().hex[:8]
+        interactive = bool(interactive) and stdin_text is None
         proc = subprocess.Popen(
-            cli_argv(args), stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+            cli_argv(args), stdin=subprocess.PIPE if (stdin_text is not None or interactive) else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=cli_env(), creationflags=NO_WINDOW,
             cwd=str(Path.home()),
         )
-        job = Job(job_id, args, proc)
+        job = Job(job_id, args, proc, interactive)
         with self._lock:
             self._jobs[job_id] = job
-        self._emit("start", {"id": job_id, "args": args, "label": label})
+        self._emit("start", {"id": job_id, "args": args, "label": label, "interactive": interactive})
         if stdin_text is not None:
             def feed():
                 try:
@@ -290,11 +331,12 @@ print('@@STATS@@' + json.dumps(out))
         if not text:
             return
         job.lines.append(text)
-        # Đăng nhập lần đầu: CLI in đường dẫn Google để người dùng mở; app báo cho giao diện hiện nút mở
+        # Đường dẫn CLI in ra (đăng nhập, cấp quyền Drive / GCP): giao diện hiện thành nút bấm mở được
         for url in URL.findall(text):
-            if "accounts.google.com" in url and url not in opened:
+            url = url.rstrip(".,;)")
+            if url not in opened and ("google.com" in url or "googleapis.com" in url):
                 opened.add(url)
-                self._emit("auth", {"id": job.id, "url": url})
+                self._emit("link", {"id": job.id, "url": url})
         self._emit("line", {"id": job.id, "text": text})
 
     def cancel(self, job_id: str) -> bool:
@@ -311,6 +353,19 @@ print('@@STATS@@' + json.dumps(out))
             pass
         return True
 
+    def send_input(self, job_id: str, text: str = "") -> bool:
+        """Gửi một dòng (Enter, mã xác thực…) vào lệnh đang chờ nhập."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if not job or not job.interactive or job.proc.stdin is None:
+            return False
+        try:
+            job.proc.stdin.write((str(text) + "\n").encode("utf-8"))
+            job.proc.stdin.flush()
+            return True
+        except Exception:
+            return False
+
     def capture(self, args: list, timeout: float = 120, stdin_text: str | None = None) -> dict:
         """Chạy `colab <args>` và chờ xong, trả toàn bộ chữ (cho danh sách tệp, đối chiếu máy…)."""
         try:
@@ -325,17 +380,32 @@ print('@@STATS@@' + json.dumps(out))
     def server_sessions(self) -> dict:
         """Máy đang chạy trên tài khoản Colab (gọi máy chủ)."""
         r = self.capture(["sessions"], timeout=60)
-        rows = []
-        for line in r["text"].splitlines():
-            m = re.match(r"\[(.+?)\]\s+(\S+)\s*\|\s*Hardware:\s*([^|]+)\|\s*Shape:\s*([^|]+)\|\s*Variant:\s*([^|]+)(?:\|\s*Status:\s*(.+))?", line.strip())
-            if m:
-                rows.append({"name": m.group(1).strip(), "endpoint": m.group(2), "accelerator": m.group(3).strip(),
-                             "shape": m.group(4).strip(), "variant": m.group(5).strip(), "status": (m.group(6) or "").strip()})
-        return {"code": r["code"], "rows": rows, "text": r["text"]}
+        return {"code": r["code"], "rows": parse_sessions(r["text"]), "text": r["text"]}
+
+    def _store(self):
+        from colab_cli.state import StateStore
+
+        return StateStore()
+
+    def unassign(self, endpoint: str) -> dict:
+        """Tắt máy theo endpoint, kể cả máy mồ côi (CLI không có lệnh tắt theo endpoint)."""
+        endpoint = str(endpoint)
+        try:
+            self._client().unassign(endpoint)
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:400]}
+        try:
+            store = self._store()
+            for name, s in list(store.list().items()):
+                if getattr(s, "endpoint", None) == endpoint:
+                    store.remove(name)
+        except Exception:
+            pass
+        return {"ok": True}
 
     def list_files(self, session: str, path: str = "") -> dict:
-        args = ["ls", "-s", session] + ([path] if path else [])
-        r = self.capture(args, timeout=60)
+        """Liệt kê /content/<path> trên máy Colab."""
+        r = self.capture(["ls", "-s", session, content_path(path)], timeout=60)
         items = []
         if r["code"] == 0:
             for line in r["text"].splitlines():
@@ -344,6 +414,69 @@ print('@@STATS@@' + json.dumps(out))
                     continue
                 items.append({"name": t.rstrip("/"), "dir": t.endswith("/")})
         return {"code": r["code"], "items": items, "text": r["text"]}
+
+    # ---------- sửa tệp trên máy Colab (như `colab edit`, nhưng sửa ngay trong app) ----------
+    EDIT_LIMIT = 2_000_000
+
+    def _tmp(self, name: str) -> Path:
+        d = Path(os.environ.get("TEMP") or Path.home()) / "colab-studio-edit"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"{uuid.uuid4().hex[:6]}-{Path(name).name or 'tep'}"
+
+    def read_remote(self, session: str, path: str) -> dict:
+        tmp = self._tmp(path)
+        try:
+            r = self.capture(["download", "-s", session, path, str(tmp)], timeout=300)
+            if r["code"] != 0 or not tmp.exists():
+                return {"ok": False, "error": r["text"].strip()[-400:] or "Không tải được tệp"}
+            data = tmp.read_bytes()
+            if len(data) > self.EDIT_LIMIT:
+                return {"ok": False, "error": "Tệp quá lớn để sửa trong app (trên 2 MB), hãy dùng Tải về."}
+            if b"\x00" in data[:8192]:
+                return {"ok": False, "error": "Đây là tệp nhị phân, không sửa dạng chữ được, hãy dùng Tải về."}
+            return {"ok": True, "text": data.decode("utf-8", "replace")}
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def write_remote(self, session: str, path: str, text: str) -> dict:
+        tmp = self._tmp(path)
+        try:
+            tmp.write_bytes(str(text).encode("utf-8"))
+            r = self.capture(["upload", "-s", session, str(tmp), path], timeout=300)
+            return {"ok": r["code"] == 0, "error": "" if r["code"] == 0 else r["text"].strip()[-400:]}
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def fs_op(self, session: str, op: str, path: str) -> dict:
+        """Tạo / xoá thư mục trên máy Colab."""
+        try:
+            code = fs_code(op, path)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        r = self.capture(["exec", "-s", session, "--timeout", "120"], timeout=180, stdin_text=code)
+        ok = "@@OK@@" in r["text"]
+        return {"ok": ok, "error": "" if ok else r["text"].strip()[-400:]}
+
+    # ---------- lối tắt Windows ----------
+    def create_shortcuts(self) -> dict:
+        """Tạo lối tắt Colab Studio trên Desktop và Start Menu (chỉ bản exe)."""
+        if not FROZEN or os.name != "nt":
+            return {"ok": False, "error": "Chỉ tạo được từ bản Colab Studio.exe"}
+        exe = sys.executable
+        q = lambda v: "'" + str(v).replace("'", "''") + "'"  # noqa: E731 — chuỗi PowerShell
+        ps = (
+            "$s=New-Object -ComObject WScript.Shell;"
+            "foreach($d in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){"
+            "$l=$s.CreateShortcut((Join-Path $d 'Colab Studio.lnk'));"
+            f"$l.TargetPath={q(exe)};$l.WorkingDirectory={q(Path(exe).parent)};"
+            f"$l.IconLocation={q(exe + ',0')};$l.Description='Colab Studio';$l.Save()}}"
+        )
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                               creationflags=NO_WINDOW, timeout=60)
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:300]}
+        return {"ok": r.returncode == 0, "error": r.stderr.decode("utf-8", "replace")[-300:]}
 
     # ---------- hộp thoại tệp ----------
     def pick_file(self, kinds: str = "code") -> str | None:
@@ -356,6 +489,16 @@ print('@@STATS@@' + json.dumps(out))
         }.get(kinds, ("Tất cả (*.*)",))
         r = self._window.create_file_dialog(webview.OPEN_DIALOG, file_types=types)
         return r[0] if r else None
+
+    def pick_files(self) -> list[str]:
+        import webview
+
+        r = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True, file_types=("Tất cả (*.*)",))
+        return list(r or [])
+
+    def write_text(self, path: str, text: str) -> bool:
+        Path(path).write_text(str(text), encoding="utf-8")
+        return True
 
     def save_file(self, suggested: str) -> str | None:
         import webview
